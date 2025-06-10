@@ -82,6 +82,7 @@ The nodes "Set Named Portal (Input)" and "Get Named Portal (Output)" should now 
 *   `Load Checkpoint` -> `CLIP` output  ->  `SetNamedPortal.value` (portal_name: "SharedCLIP")
 *   ... other parts of your graph ...
 *   `GetNamedPortal.value` (portal_name: "SharedCLIP")  ->  `CLIPTextEncode.clip`
+![Example.png](https://github.com/Adore021/ComfyPortal/blob/main/Example.png)
 
 ## Troubleshooting
 
