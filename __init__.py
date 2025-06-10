@@ -34,21 +34,20 @@ class GetNamedPortal:
 
     @classmethod
     def INPUT_TYPES(s):
-        # Initialize with a placeholder. JS will populate this.
-        initial_portal_names = ["_refresh_or_no_portals_"]
         return {
             "required": {
-                "portal_name": (initial_portal_names, ), # Changed to COMBO
+                # Change to STRING to allow any value from the frontend-populated combo.
+                # The actual "combo" behavior will be managed by JS.
+                "portal_name": ("STRING", {"default": "_refresh_or_no_portals_"}),
             }
         }
 
     def nop_function(self, portal_name):
         print(f"[ComfyPortals] GetNamedPortal for '{portal_name}' executed (Python-side NOP). Expecting data via temp link.")
         if portal_name == "_refresh_or_no_portals_" or portal_name == "_no_portals_found_":
-            print(f"[ComfyPortals] Warning: GetNamedPortal '{self.id if hasattr(self, 'id') else 'unknown'}' has no valid portal selected.")
-            # Optionally, you could raise an error or return a specific signal
-            # if execution proceeds with an invalid portal name.
-            # For now, it will likely fail later if no temp link is made.
+            print(f"[ComfyPortals] Warning: GetNamedPortal '{getattr(self, 'id', 'unknown')}' has no valid portal selected ('{portal_name}').")
+            # This won't cause a validation error anymore, but our graphToPrompt logic
+            # should still skip making temp links for these placeholders.
         return (None,)
 
 NODE_CLASS_MAPPINGS = {
@@ -63,4 +62,4 @@ NODE_DISPLAY_NAME_MAPPINGS = {
 
 WEB_DIRECTORY = "./js"
 
-print("[ComfyPortals] Custom Portal nodes loaded (v-Next.2 - Dynamic Dropdown for Get).")
+print("[ComfyPortals] Custom Portal nodes loaded (v-Next.4 - Portal Manager UI).")
