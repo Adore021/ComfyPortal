@@ -11,10 +11,11 @@ This system offers a more explicit, variable-like approach: you create a named p
 *   **Explicit Portal Naming:** Clearly define portal names for sending and receiving data.
 *   **No Python Global Data Storage:** Portal nodes are lightweight Python placeholders. Data flows via temporary, direct links created by JavaScript during prompt execution, ensuring efficiency.
 *   **Type-Aware Sender:** The `Set Named Portal` node's input UI updates to show the type of data connected to it (e.g., "value (CLIP)").
-*   **(Not Included in current version)Dynamic Portal List:** The `Get Named Portal` node features a "Scan Available Portals" button that populates its list with currently defined portal names from your graph.
+*   **Dynamic Portal List:** The `Get Named Portal` node features a "Scan Available Portals" button that populates its list with currently defined portal names from your graph.
 *   **Preserves Graph Clarity:** Keeps your main workflow connections tidy.
 *   **(Experimental) Visual Path Display:** The `Get Named Portal` node will include a "Show/Hide Path" button to visually trace the data flow from the true data source to the true data destination on the canvas. *(This feature is in active development and refinement).*
-
+*   **UI for managing/listing all defined portals in the workflow.
+* 
 ## How It Works (Conceptual)
 
 1.  **`Set Named Portal (Input)` Node:**
@@ -102,8 +103,7 @@ The nodes "Set Named Portal (Input)" and "Get Named Portal (Output)" should now 
 
 ## Future Enhancements
 
-*   Dynamic dropdown list for `GetNamedPortal.portal_name` that auto-refreshes.
-*   UI for managing/listing all defined portals in the workflow.
+*   Dynamic Multi Input and output 
 
 ## Contributing
 
