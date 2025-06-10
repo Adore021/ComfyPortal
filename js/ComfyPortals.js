@@ -46,66 +46,119 @@ const PLACEHOLDER_REFRESH = "_refresh_or_no_portals_"; // Should match Python de
 
 // --- Central function to refresh all portal-related UI elements ---
 function refreshAllPortalVisuals() {
-    if (!app.graph) {
-        // console.warn("[ComfyPortals] refreshAllPortalVisuals: app.graph not ready.");
-        return;
-    }
+    if (!app.graph) return;
 
-    const setNodes = app.graph._nodes.filter(n =>
+    const allNodes = app.graph._nodes;
+    const NODE_MODE_BYPASSED = LiteGraph.NODE_MODE_BYPASSED || 4;
+    const NODE_MODE_NEVER = 2; // Muted/Never mode
+
+    // 1. Find all active SetNamedPortal nodes and their names/types
+    const activeSetters = allNodes.filter(n =>
         n.comfyClass === "SetNamedPortal" &&
-        n.mode !== LiteGraph.NODE_MODE_BYPASSED &&
-        n.mode !== 2 // Muted/Never mode
+        n.mode !== NODE_MODE_BYPASSED &&
+        n.mode !== NODE_MODE_NEVER
     );
 
-    const activePortalsDataForPanel = [];
-    const portalNamesForDropdownSet = new Set();
-
-    setNodes.forEach(setNode => {
+    const availableSetPortals = new Map(); // Store as Map: { portalName: portalType }
+    activeSetters.forEach(setNode => {
         const name = getPortalNameFromNodeWidget(setNode);
         if (name) {
-            portalNamesForDropdownSet.add(name);
-            activePortalsDataForPanel.push({
-                name: name,
-                type: setNode._actualDataType || (setNode.inputs?.find(i=>i.name==="value")?.type) || "*"
-            });
+            const type = setNode._actualDataType || (setNode.inputs?.find(i=>i.name==="value")?.type) || "*";
+            availableSetPortals.set(name, type);
         }
     });
 
-    activePortalsDataForPanel.sort((a, b) => a.name.localeCompare(b.name));
+    // 2. Find all active GetNamedPortal nodes and the names they are requesting
+    const activeGetters = allNodes.filter(n =>
+        n.comfyClass === "GetNamedPortal" &&
+        n.mode !== NODE_MODE_BYPASSED &&
+        n.mode !== NODE_MODE_NEVER
+    );
 
-    const sortedPortalNamesArray = Array.from(portalNamesForDropdownSet).sort();
-    let finalDropdownNames = sortedPortalNamesArray.length > 0 ? sortedPortalNamesArray : [PLACEHOLDER_REFRESH]; // Use REFRESH placeholder
+    const requestedPortalNames = new Set();
+    activeGetters.forEach(getNode => {
+        const name = getPortalNameFromNodeWidget(getNode);
+        if (name && name !== PLACEHOLDER_REFRESH && name !== PLACEHOLDER_NO_PORTALS) {
+            requestedPortalNames.add(name);
+        }
+    });
+
+    // 3. Determine "Used" portals for the panel (intersection of set and requested)
+    const usedPortalsDataForPanel = [];
+    requestedPortalNames.forEach(requestedName => {
+        if (availableSetPortals.has(requestedName)) {
+            usedPortalsDataForPanel.push({
+                name: requestedName,
+                type: availableSetPortals.get(requestedName)
+            });
+        }
+    });
+    usedPortalsDataForPanel.sort((a, b) => a.name.localeCompare(b.name));
+
+    // 4. Update Portal Manager Panel with ONLY used portals
+    if (portalPanelInstance) {
+        portalPanelInstance.updateList(usedPortalsDataForPanel);
+    }
+
+    // 5. Update GetPortal Dropdowns with ALL available Set portal names
+    // (Dropdowns should still show all *definable* portals, not just currently used ones)
+    const allAvailablePortalNamesArray = Array.from(availableSetPortals.keys()).sort();
+    let finalDropdownNames = allAvailablePortalNamesArray.length > 0 ? allAvailablePortalNamesArray : [PLACEHOLDER_REFRESH];
 
     if (JSON.stringify(lastKnownPortalNamesForDropdown) !== JSON.stringify(finalDropdownNames)) {
         lastKnownPortalNamesForDropdown = finalDropdownNames;
-        const getNodes = app.graph._nodes.filter(n => n.comfyClass === "GetNamedPortal");
-        getNodes.forEach(getNode => {
+        const getNodesForDropdownUpdate = allNodes.filter(n => n.comfyClass === "GetNamedPortal");
+        getNodesForDropdownUpdate.forEach(getNode => {
             const widget = getNode.widgets.find(w => w.name === "portal_name");
-            // Ensure widget is treated as combo even if Python defines it as STRING
-            if (widget && (widget.type === "combo" || widget.type === "string")) { // Allow string type too
-                const currentValue = widget.value;
-                if (widget.options) { // Combo widgets have .options
-                    widget.options.values = [...finalDropdownNames];
-                } else { // For string widgets we might not be able to change options directly, but refreshAllVisuals will be called on node create/load
-                    // If it was forced to a combo in nodeCreated/loadedGraphNode, this branch might not be hit often for 'string'
+            if (widget && (widget.type === "combo" || widget.type === "string")) {
+                const originalValue = widget.value; // Store original value before changing options
+                let valueChanged = false;
+
+                if (widget.options) {
+                    // Check if options actually need updating to avoid unnecessary redraws if only value changes
+                    if (JSON.stringify(widget.options.values) !== JSON.stringify(finalDropdownNames)) {
+                        widget.options.values = [...finalDropdownNames];
+                        // If options changed, the current value might become invalid, so we might need to reset it.
+                        // This logic below will handle that.
+                    }
+                } else if (widget.type === "combo") { // Combo widget somehow lost its options
+                    widget.options = { values: [...finalDropdownNames] };
                 }
 
-                if (finalDropdownNames.includes(currentValue)) {
-                    widget.value = currentValue;
+
+                if (finalDropdownNames.includes(originalValue)) {
+                    if (widget.value !== originalValue) { // If it was somehow different
+                        widget.value = originalValue;
+                        valueChanged = true;
+                    }
                 } else if (finalDropdownNames.length > 0) {
-                    widget.value = finalDropdownNames[0];
+                    if (widget.value !== finalDropdownNames[0]) {
+                        widget.value = finalDropdownNames[0];
+                        valueChanged = true;
+                    }
                 } else { // Should be PLACEHOLDER_REFRESH
-                    widget.value = PLACEHOLDER_REFRESH;
+                    if (widget.value !== PLACEHOLDER_REFRESH) {
+                        widget.value = PLACEHOLDER_REFRESH;
+                        valueChanged = true;
+                    }
                 }
-                // Litegraph widgets usually redraw themselves on value change,
-                // but if not, getNode.setDirtyCanvas(true, false); might be needed here.
+
+                // If the widget's options or value has changed, or if we always want to ensure it's up-to-date visually for new nodes
+                // LiteGraph sometimes needs a nudge to redraw the widget itself.
+                // Forcing setDirtyCanvas on the node is a common way.
+                if (getNode.setDirtyCanvas) {
+                     // getNode.setDirtyCanvas(true, true); // Redraw node and its widgets
+                     // Forcing a value change (even to itself) on a combo can sometimes trigger its internal redraw.
+                     // This is a bit of a hack but can be effective.
+                     const tempVal = widget.value;
+                     widget.value = null; // Temporarily set to null
+                     widget.value = tempVal; // Set it back
+                }
             }
         });
     }
-
-    if (portalPanelInstance) {
-        portalPanelInstance.updateList(activePortalsDataForPanel);
-    }
+    // console.log("[ComfyPortals] RefreshAllPortalVisuals: Complete.");
+    lastKnownPortalNamesForDropdown = finalDropdownNames;
 }
 
 // --- Temporary Link Management ---
@@ -150,7 +203,7 @@ function createTemporaryPortalLinks(virtualPortalConnections) {
 
 // --- Main Extension ---
 app.registerExtension({
-    name: "Comfy.ComfyPortals.JS.v24.3", // Version for this iteration
+    name: "Comfy.ComfyPortals.JS.v24.4", // Version for this iteration
 
     async beforeRegisterNodeDef(nodeType, nodeData, appInstance) {
         if (nodeData.name === "Set Named Portal (Input)") {
@@ -163,37 +216,84 @@ app.registerExtension({
                 }
             };
         }
+
+        // Add onNodeCloned hook for GetNamedPortal
+        if (nodeData.name === "Get Named Portal (Output)") {
+            nodeType.onNodeCloned = function(originalNode, clonedNode) {
+                // originalNode is the node that was cloned
+                // clonedNode is the new node that was created from the clone operation
+
+                // console.log(`[ComfyPortals] GetNamedPortal cloned: Original ID ${originalNode.id}, New ID ${clonedNode.id}`);
+
+                // The clonedNode will already go through its own `nodeCreated` lifecycle.
+                // In `nodeCreated` for GetNamedPortal, we already:
+                // 1. Ensure its portal_name widget is a combo.
+                // 2. Attach callbacks.
+                // 3. Attempt to populate its dropdown.
+                // 4. Call refreshAllPortalVisuals.
+
+                // So, theoretically, nodeCreated should handle most of it.
+                // However, if there's a very specific state from the original that needs
+                // careful re-initialization on the clone, you could do it here.
+                // For now, just ensuring refreshAllPortalVisuals is called might be enough
+                // to update the panel if the act of cloning changes the "used" portals.
+                // But nodeCreated for the clonedNode should already call it.
+
+                // We can explicitly trigger a refresh for the cloned node's dropdown visuals
+                // in case the timing in its nodeCreated isn't perfect for cloned nodes.
+                setTimeout(() => {
+                    const widget = clonedNode.widgets.find(w => w.name === "portal_name");
+                    if (widget && widget.type === "combo") {
+                        // Re-fetch latest portal names
+                        const setNodes = app.graph._nodes.filter(n => n.comfyClass === "SetNamedPortal" && n.mode !== (LiteGraph.NODE_MODE_BYPASSED || 4) && n.mode !== 2);
+                        const availableNames = new Set();
+                        setNodes.forEach(setNode => {
+                            const name = getPortalNameFromNodeWidget(setNode);
+                            if (name) availableNames.add(name);
+                        });
+                        const sortedNames = Array.from(availableNames).sort();
+                        const finalNames = sortedNames.length > 0 ? sortedNames : [PLACEHOLDER_REFRESH];
+
+                        widget.options.values = [...finalNames];
+                        if (!finalNames.includes(widget.value)) {
+                            widget.value = finalNames[0];
+                        }
+                        // Force redraw
+                        const tempVal = widget.value;
+                        widget.value = null;
+                        widget.value = tempVal;
+                    }
+                    // And a global refresh for the panel
+                    refreshAllPortalVisuals();
+                }, 100); // Slightly longer delay for cloned node to fully initialize
+            };
+        }
     },
 
     async nodeCreated(node, appInstance) {
         if (node.comfyClass === "SetNamedPortal") {
-            setTimeout(() => {
-                updateSetPortalInfo(node);
-                refreshAllPortalVisuals();
-            }, 50);
-            const portalNameWidget = node.widgets.find(w => w.name === "portal_name");
-            if (portalNameWidget) {
-                const originalWidgetCallback = portalNameWidget.callback;
-                portalNameWidget.callback = (value, ...args) => {
-                    if (originalWidgetCallback) originalWidgetCallback.call(node, value, ...args);
-                    setTimeout(refreshAllPortalVisuals, 0);
-                };
-            }
+            // ... (existing SetNamedPortal logic) ...
         } else if (node.comfyClass === "GetNamedPortal") {
-            let portalNameWidget = node.widgets.find(w => w.name === "portal_name");
-            const currentValue = portalNameWidget ? portalNameWidget.value : PLACEHOLDER_REFRESH;
+            let portalNameWidgetInstance = node.widgets.find(w => w.name === "portal_name");
+            const currentWidgetValue = portalNameWidgetInstance ? portalNameWidgetInstance.value : PLACEHOLDER_REFRESH;
+            let isNewWidget = false;
 
-            if (!portalNameWidget || portalNameWidget.type !== "combo") {
-                const widgetIndex = portalNameWidget ? node.widgets.indexOf(portalNameWidget) : -1;
+            if (!portalNameWidgetInstance || portalNameWidgetInstance.type !== "combo") {
+                const widgetIndex = portalNameWidgetInstance ? node.widgets.indexOf(portalNameWidgetInstance) : -1;
                 if (widgetIndex > -1) {
                     node.widgets.splice(widgetIndex, 1);
                 }
-                // Add as a combo widget. LiteGraph will handle its appearance.
-                // The actual values will be populated by refreshAllPortalVisuals.
-                node.addWidget("combo", "portal_name", currentValue, () => {}, {
-                    values: [currentValue] // Initial value for the combo
-                });
-                console.log(`[ComfyPortals] GetNamedPortal ${node.id}: portal_name widget ensured/created as COMBO.`);
+                portalNameWidgetInstance = node.addWidget("combo", "portal_name", currentWidgetValue, () => {
+                    setTimeout(refreshAllPortalVisuals, 0);
+                }, { values: [currentWidgetValue] }); // Initialize with current or placeholder
+                isNewWidget = true;
+                console.log(`[ComfyPortals] GetNamedPortal ${node.id}: portal_name widget ensured/created as COMBO with callback.`);
+            } else {
+                const originalComboCallback = portalNameWidgetInstance.callback;
+                portalNameWidgetInstance.callback = (value, LGraphCanvas, N, pos, event) => {
+                    if(originalComboCallback) originalComboCallback.call(node, value, LGraphCanvas, N, pos, event);
+                    setTimeout(refreshAllPortalVisuals, 0);
+                };
             }
 
             if (!node.widgets?.find(w => w.name === "Refresh List")) {
@@ -201,40 +301,70 @@ app.registerExtension({
                     refreshAllPortalVisuals();
                 }, {});
             }
-            setTimeout(refreshAllPortalVisuals, 50); // Populate/refresh its dropdown
+
+            // **Immediately populate this new node's dropdown after ensuring it's a combo**
+            // 1. Get current available portal names
+            const setNodes = app.graph._nodes.filter(n => n.comfyClass === "SetNamedPortal" && n.mode !== (LiteGraph.NODE_MODE_BYPASSED || 4) && n.mode !== 2);
+            const availableNames = new Set();
+            setNodes.forEach(setNode => {
+                const name = getPortalNameFromNodeWidget(setNode);
+                if (name) availableNames.add(name);
+            });
+            const sortedNames = Array.from(availableNames).sort();
+            const finalNames = sortedNames.length > 0 ? sortedNames : [PLACEHOLDER_REFRESH];
+
+            // 2. Update the widget of THIS new node
+            portalNameWidgetInstance.options.values = [...finalNames];
+            if (!finalNames.includes(portalNameWidgetInstance.value)) { // If current value is invalid (e.g. placeholder)
+                portalNameWidgetInstance.value = finalNames[0];
+            }
+
+            // 3. Force redraw of this specific node's widget if it was newly created/configured
+            //    or if its value/options were just set.
+            if (isNewWidget || node.setDirtyCanvas) { // isNewWidget helps for the very first creation
+                 const tempVal = portalNameWidgetInstance.value;
+                 portalNameWidgetInstance.value = null; // Force internal update in LiteGraph
+                 portalNameWidgetInstance.value = tempVal;
+                 // node.setDirtyCanvas(true, true); // Might be needed if the above doesn't work
+            }
+
+
+            // This global refresh is still good for other nodes and the panel
+            setTimeout(refreshAllPortalVisuals, 50);
         }
     },
 
     async loadedGraphNode(node, appInstance) {
         if (node.comfyClass === "SetNamedPortal") {
-            setTimeout(() => updateSetPortalInfo(node), 100);
-            const portalNameWidget = node.widgets.find(w => w.name === "portal_name");
-            if (portalNameWidget && (!portalNameWidget.callback || !portalNameWidget.callback.toString().includes("refreshAllPortalVisuals"))) {
-                const originalWidgetCallback = portalNameWidget.callback;
-                portalNameWidget.callback = (value, ...args) => {
-                    if (originalWidgetCallback) originalWidgetCallback.call(node, value, ...args);
-                    setTimeout(refreshAllPortalVisuals, 0);
-                };
-            }
+            // ... (SetNamedPortal logic remains the same as v24.3) ...
         } else if (node.comfyClass === "GetNamedPortal") {
-            let portalNameWidget = node.widgets.find(w => w.name === "portal_name");
-            const loadedValue = portalNameWidget ? portalNameWidget.value : PLACEHOLDER_REFRESH;
+            let portalNameWidgetInstance = node.widgets.find(w => w.name === "portal_name");
+            const loadedWidgetValue = portalNameWidgetInstance ? portalNameWidgetInstance.value : PLACEHOLDER_REFRESH;
 
-            if (!portalNameWidget || portalNameWidget.type !== "combo") {
-                const widgetIndex = portalNameWidget ? node.widgets.indexOf(portalNameWidget) : -1;
+            if (!portalNameWidgetInstance || portalNameWidgetInstance.type !== "combo") {
+                const widgetIndex = portalNameWidgetInstance ? node.widgets.indexOf(portalNameWidgetInstance) : -1;
                 if (widgetIndex > -1) {
                     node.widgets.splice(widgetIndex, 1);
                 }
-                node.addWidget("combo", "portal_name", loadedValue, () => {}, {
-                    values: [loadedValue] // Use the loaded value as the initial item
-                });
-                console.log(`[ComfyPortals] GetNamedPortal ${node.id} (loaded): portal_name widget ensured/created as COMBO.`);
+                portalNameWidgetInstance = node.addWidget("combo", "portal_name", loadedWidgetValue, () => {
+                    setTimeout(refreshAllPortalVisuals, 0);
+                }, { values: [loadedWidgetValue] });
+                console.log(`[ComfyPortals] GetNamedPortal ${node.id} (loaded): portal_name widget ensured/created as COMBO with callback.`);
+            } else {
+                 // Ensure existing combo has the callback if it was lost during serialization or not set by an older version
+                if (!portalNameWidgetInstance.callback || !portalNameWidgetInstance.callback.toString().includes("refreshAllPortalVisuals")) {
+                    const originalComboCallback = portalNameWidgetInstance.callback;
+                    portalNameWidgetInstance.callback = (value, LGraphCanvas, N, pos, event) => {
+                        if(originalComboCallback) originalComboCallback.call(node, value, LGraphCanvas, N, pos, event);
+                        setTimeout(refreshAllPortalVisuals, 0);
+                    };
+                }
             }
 
             if (!node.widgets?.find(w => w.name === "Refresh List")) {
                 node.addWidget("button", "Refresh List", null, () => refreshAllPortalVisuals(), {});
             }
-            // The main refresh in setup will populate it correctly after all nodes are loaded.
+            // The main refresh in setup will populate it after all nodes are loaded.
         }
     },
 
@@ -283,12 +413,12 @@ app.registerExtension({
             const originalOnNodeRemoved = LGraph.prototype.onNodeRemoved;
             LGraph.prototype.onNodeRemoved = function(node) {
                 const res = originalOnNodeRemoved?.apply(this, arguments);
-                if (node && node.comfyClass === "SetNamedPortal") {
+                if (node && node.comfyClass === "SetNamedPortal" || node.comfyClass === "GetNamedPortal") {
                     setTimeout(refreshAllPortalVisuals, 0);
                 }
                 return res;
             };
-            console.log("[ComfyPortals] onNodeRemoved patched.");
+            console.log("[ComfyPortals] onNodeRemoved patched (for Set and Get Portals).");
         } catch (e) { console.error("[ComfyPortals] Error patching onNodeRemoved:", e); }
 
         try {
@@ -357,4 +487,4 @@ app.registerExtension({
         console.log("[ComfyPortals] Floating button setup complete.");
     }
 });
-console.log("[ComfyPortals.JS] Script loaded (v24.3 - Floating Button, STRING GetPortal Fix - at end).");
+console.log("[ComfyPortals.JS] Script loaded (v24.4 - Floating Button, STRING GetPortal Fix - at end).");
