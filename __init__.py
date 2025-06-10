@@ -34,15 +34,21 @@ class GetNamedPortal:
 
     @classmethod
     def INPUT_TYPES(s):
+        # Initialize with a placeholder. JS will populate this.
+        initial_portal_names = ["_refresh_or_no_portals_"]
         return {
             "required": {
-                # Changed to STRING to avoid backend validation errors with dynamic COMBOs
-                "portal_name": ("STRING", {"default": "_type_portal_name_"}),
+                "portal_name": (initial_portal_names, ), # Changed to COMBO
             }
         }
 
     def nop_function(self, portal_name):
         print(f"[ComfyPortals] GetNamedPortal for '{portal_name}' executed (Python-side NOP). Expecting data via temp link.")
+        if portal_name == "_refresh_or_no_portals_" or portal_name == "_no_portals_found_":
+            print(f"[ComfyPortals] Warning: GetNamedPortal '{self.id if hasattr(self, 'id') else 'unknown'}' has no valid portal selected.")
+            # Optionally, you could raise an error or return a specific signal
+            # if execution proceeds with an invalid portal name.
+            # For now, it will likely fail later if no temp link is made.
         return (None,)
 
 NODE_CLASS_MAPPINGS = {
@@ -57,4 +63,4 @@ NODE_DISPLAY_NAME_MAPPINGS = {
 
 WEB_DIRECTORY = "./js"
 
-print("[ComfyPortals] Custom Portal nodes loaded (v-Next.1 - Virtual Wiring, STRING input for Get).")
+print("[ComfyPortals] Custom Portal nodes loaded (v-Next.2 - Dynamic Dropdown for Get).")
