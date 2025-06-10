@@ -1,0 +1,8 @@
+# IntelliJ IDEA specific files
+.idea/
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
