@@ -2,7 +2,8 @@
 import { app } from "/scripts/app.js";
 import { initializePortalManagerUI, portalManagerPanelInstance as panelInstanceFromModule } from "./portal_manager_ui.js";
 
-console.log("[ComfyPortals.JS] Script loading (v24.3 - Floating Button, STRING GetPortal Fix).");
+const EXTENSION_VERSION = "Comfy.ComfyPortals.JS.vNext7_MultiLinkDataFlow";
+console.log(`[ComfyPortals.JS] Script loading (${EXTENSION_VERSION}).`);
 
 let portalPanelInstance;
 
@@ -19,30 +20,76 @@ function getPortalNameFromNodeWidget(nodeInstance) {
 }
 
 // --- Utility: Update SetNamedPortal's stored type and UI ---
-function updateSetPortalInfo(nodeInstance) {
+function updateSetPortalSlotsInfo(nodeInstance) {
     if (nodeInstance?.comfyClass !== "SetNamedPortal" || !nodeInstance.inputs) return;
-    const valueSlotIndex = nodeInstance.inputs.findIndex(inp => inp.name === "value");
-    if (valueSlotIndex === -1) return;
 
-    const inputSlot = nodeInstance.inputs[valueSlotIndex];
-    let determinedType = "*";
-    if (inputSlot.link != null && app.graph.links[inputSlot.link]) {
-        const linkToSetPortal = app.graph.links[inputSlot.link];
-        const originNode = app.graph.getNodeById(linkToSetPortal.origin_id);
-        if (originNode?.outputs?.[linkToSetPortal.origin_slot]) {
-            determinedType = originNode.outputs[linkToSetPortal.origin_slot].type || "*";
-            if (linkToSetPortal.type !== determinedType) linkToSetPortal.type = determinedType;
+    let hasChanges = false;
+    const newActualInputSlotTypes = [];
+
+    // Update labels and types for existing inputs
+    nodeInstance.inputs.forEach((inputSlot) => {
+        if (inputSlot.name.startsWith("value_")) {
+            // ... (type determination logic from your previous script) ...
+            let determinedType = "*";
+            let currentLink = null;
+            if (inputSlot.link != null && app.graph.links[inputSlot.link]) { /* ... */ determinedType = "..."; } // Simplified for brevity
+            // (Full type determination logic as in your script)
+            if (inputSlot.link != null && app.graph.links[inputSlot.link]) {
+                currentLink = app.graph.links[inputSlot.link];
+                const originNode = app.graph.getNodeById(currentLink.origin_id);
+                if (originNode && typeof currentLink.origin_slot !== 'undefined' && originNode.outputs && originNode.outputs[currentLink.origin_slot]) {
+                    const originSlot = originNode.outputs[currentLink.origin_slot];
+                    determinedType = originSlot.type || "*";
+                    if (currentLink.type && currentLink.type !== "*" && currentLink.type !== "ಪ್ಲೇಸ್холడర్") determinedType = currentLink.type;
+                    if (currentLink.type !== determinedType) currentLink.type = determinedType;
+                } else if (currentLink && currentLink.type && currentLink.type !== "*" && currentLink.type !== "ಪ್ಲೇಸ್холడర్") {
+                    determinedType = currentLink.type;
+                }
+            } else {
+                determinedType = "*";
+            }
+
+            const newLabel = `${inputSlot.name} (${determinedType})`;
+            if (inputSlot.label !== newLabel) { inputSlot.label = newLabel; hasChanges = true; }
+            if (inputSlot.type !== determinedType) { inputSlot.type = determinedType; hasChanges = true; }
+            newActualInputSlotTypes.push({ name: inputSlot.name, type: inputSlot.type, originalType: "*" });
+        } else if (inputSlot.name === "portal_name") {
+            newActualInputSlotTypes.push({ name: inputSlot.name, type: "STRING", originalType: "STRING" });
+        }
+    });
+
+    // Update _actualInputSlotTypes and check if it changed
+    const oldActualInputSlotTypes = nodeInstance._actualInputSlotTypes || [];
+    if (newActualInputSlotTypes.length !== oldActualInputSlotTypes.length ||
+        !newActualInputSlotTypes.every((s, i) => oldActualInputSlotTypes[i] && s.name === oldActualInputSlotTypes[i].name && s.type === oldActualInputSlotTypes[i].type)) {
+        nodeInstance._actualInputSlotTypes = newActualInputSlotTypes;
+        hasChanges = true;
+    }
+
+    if (hasChanges) {
+        nodeInstance.setDirtyCanvas(true, true);
+        if (nodeInstance.graph) {
+            if (typeof nodeInstance.graph.onNodeInputsChanged === 'function') {
+                nodeInstance.graph.onNodeInputsChanged(nodeInstance);
+            }
+            // If updateSetPortalSlotsInfo itself needs to resize (e.g., label text length changed drastically)
+            // it can still do so. But for removal, the button callback will be more explicit.
+            if (typeof nodeInstance.computeSize === 'function' && typeof nodeInstance.setSize === 'function') {
+                let newSize = nodeInstance.computeSize();
+                if (newSize && Array.isArray(newSize.vec2)) newSize = newSize.vec2; // Handle LVector
+                if (Array.isArray(newSize)) nodeInstance.setSize(newSize);
+            }
+            if (typeof nodeInstance.graph.setDirtyCanvas === 'function') {
+                nodeInstance.graph.setDirtyCanvas(true, true);
+            }
         }
     }
-    nodeInstance._actualDataType = determinedType;
-    inputSlot.label = `value (${determinedType})`;
-    nodeInstance.setDirtyCanvas(true, true);
 }
 
 // --- Portal Name Management ---
 let lastKnownPortalNamesForDropdown = [];
 const PLACEHOLDER_NO_PORTALS = "_no_portals_found_";
-const PLACEHOLDER_REFRESH = "_refresh_or_no_portals_"; // Should match Python default
+const PLACEHOLDER_REFRESH = "_refresh_or_no_portals_";
 
 // --- Central function to refresh all portal-related UI elements ---
 function refreshAllPortalVisuals() {
@@ -50,25 +97,32 @@ function refreshAllPortalVisuals() {
 
     const allNodes = app.graph._nodes;
     const NODE_MODE_BYPASSED = LiteGraph.NODE_MODE_BYPASSED || 4;
-    const NODE_MODE_NEVER = 2; // Muted/Never mode
+    const NODE_MODE_NEVER = 2;
 
-    // 1. Find all active SetNamedPortal nodes and their names/types
     const activeSetters = allNodes.filter(n =>
         n.comfyClass === "SetNamedPortal" &&
         n.mode !== NODE_MODE_BYPASSED &&
         n.mode !== NODE_MODE_NEVER
     );
 
-    const availableSetPortals = new Map(); // Store as Map: { portalName: portalType }
+    const availableSetPortals = new Map();
     activeSetters.forEach(setNode => {
         const name = getPortalNameFromNodeWidget(setNode);
         if (name) {
-            const type = setNode._actualDataType || (setNode.inputs?.find(i=>i.name==="value")?.type) || "*";
-            availableSetPortals.set(name, type);
+            let portalDisplayType = "*";
+            if (setNode._actualInputSlotTypes && setNode._actualInputSlotTypes.length > 0) {
+                const value1Slot = setNode._actualInputSlotTypes.find(s => s.name === "value_1");
+                const firstValueSlot = setNode._actualInputSlotTypes.find(s => s.name.startsWith("value_"));
+                if (value1Slot) {
+                    portalDisplayType = value1Slot.type;
+                } else if (firstValueSlot) {
+                    portalDisplayType = firstValueSlot.type;
+                }
+            }
+            availableSetPortals.set(name, portalDisplayType);
         }
     });
 
-    // 2. Find all active GetNamedPortal nodes and the names they are requesting
     const activeGetters = allNodes.filter(n =>
         n.comfyClass === "GetNamedPortal" &&
         n.mode !== NODE_MODE_BYPASSED &&
@@ -83,7 +137,6 @@ function refreshAllPortalVisuals() {
         }
     });
 
-    // 3. Determine "Used" portals for the panel (intersection of set and requested)
     const usedPortalsDataForPanel = [];
     requestedPortalNames.forEach(requestedName => {
         if (availableSetPortals.has(requestedName)) {
@@ -95,106 +148,192 @@ function refreshAllPortalVisuals() {
     });
     usedPortalsDataForPanel.sort((a, b) => a.name.localeCompare(b.name));
 
-    // 4. Update Portal Manager Panel with ONLY used portals
     if (portalPanelInstance) {
         portalPanelInstance.updateList(usedPortalsDataForPanel);
     }
 
-    // 5. Update GetPortal Dropdowns with ALL available Set portal names
-    // (Dropdowns should still show all *definable* portals, not just currently used ones)
     const allAvailablePortalNamesArray = Array.from(availableSetPortals.keys()).sort();
     let finalDropdownNames = allAvailablePortalNamesArray.length > 0 ? allAvailablePortalNamesArray : [PLACEHOLDER_REFRESH];
 
-    if (JSON.stringify(lastKnownPortalNamesForDropdown) !== JSON.stringify(finalDropdownNames)) {
-        lastKnownPortalNamesForDropdown = finalDropdownNames;
-        const getNodesForDropdownUpdate = allNodes.filter(n => n.comfyClass === "GetNamedPortal");
-        getNodesForDropdownUpdate.forEach(getNode => {
-            const widget = getNode.widgets.find(w => w.name === "portal_name");
-            if (widget && (widget.type === "combo" || widget.type === "string")) {
-                const originalValue = widget.value; // Store original value before changing options
-                let valueChanged = false;
+    const getNodesForDropdownUpdate = allNodes.filter(n => n.comfyClass === "GetNamedPortal");
+    getNodesForDropdownUpdate.forEach(getNode => {
+        const widget = getNode.widgets.find(w => w.name === "portal_name");
+        if (widget && (widget.type === "combo" || widget.type === "string")) {
+            const originalValue = widget.value;
+            let optionsChanged = false;
+            let valueChanged = false;
 
-                if (widget.options) {
-                    // Check if options actually need updating to avoid unnecessary redraws if only value changes
-                    if (JSON.stringify(widget.options.values) !== JSON.stringify(finalDropdownNames)) {
-                        widget.options.values = [...finalDropdownNames];
-                        // If options changed, the current value might become invalid, so we might need to reset it.
-                        // This logic below will handle that.
-                    }
-                } else if (widget.type === "combo") { // Combo widget somehow lost its options
-                    widget.options = { values: [...finalDropdownNames] };
+            // Update dropdown options if they differ from the fresh list
+            if (widget.type === "combo") { // Only combo widgets have 'options'
+                if (!widget.options) widget.options = {}; // Ensure options object exists
+                if (JSON.stringify(widget.options.values) !== JSON.stringify(finalDropdownNames)) {
+                    widget.options.values = [...finalDropdownNames];
+                    optionsChanged = true;
                 }
+            }
 
+            // Update widget's selected value based on new options
+            let newSelectedValue = originalValue;
+            if (finalDropdownNames.includes(originalValue)) {
+                // Current value is still valid, newSelectedValue remains originalValue
+                newSelectedValue = originalValue;
+            } else if (finalDropdownNames.length > 0) {
+                // Current value is not in the new list (or was a placeholder), select the first available
+                newSelectedValue = finalDropdownNames[0];
+            } else {
+                // No portals available, use placeholder
+                newSelectedValue = PLACEHOLDER_REFRESH;
+            }
 
-                if (finalDropdownNames.includes(originalValue)) {
-                    if (widget.value !== originalValue) { // If it was somehow different
-                        widget.value = originalValue;
-                        valueChanged = true;
-                    }
-                } else if (finalDropdownNames.length > 0) {
-                    if (widget.value !== finalDropdownNames[0]) {
-                        widget.value = finalDropdownNames[0];
-                        valueChanged = true;
-                    }
-                } else { // Should be PLACEHOLDER_REFRESH
-                    if (widget.value !== PLACEHOLDER_REFRESH) {
-                        widget.value = PLACEHOLDER_REFRESH;
-                        valueChanged = true;
-                    }
-                }
+            if (widget.value !== newSelectedValue) {
+                widget.value = newSelectedValue;
+                valueChanged = true;
+            }
 
-                // If the widget's options or value has changed, or if we always want to ensure it's up-to-date visually for new nodes
-                // LiteGraph sometimes needs a nudge to redraw the widget itself.
-                // Forcing setDirtyCanvas on the node is a common way.
-                if (getNode.setDirtyCanvas) {
-                     // getNode.setDirtyCanvas(true, true); // Redraw node and its widgets
-                     // Forcing a value change (even to itself) on a combo can sometimes trigger its internal redraw.
-                     // This is a bit of a hack but can be effective.
-                     const tempVal = widget.value;
-                     widget.value = null; // Temporarily set to null
-                     widget.value = tempVal; // Set it back
-                }
+            // Force redraw of the widget if its options or value have changed.
+            // This is a common pattern to ensure LiteGraph updates the widget's visual representation.
+            if ((optionsChanged || valueChanged) && getNode.setDirtyCanvas) {
+                const tempVal = widget.value;
+                widget.value = null; // Momentarily set to null
+                widget.value = tempVal; // Set back to the desired value to trigger redraw
+            }
+        }
+    });
+
+    // Update the global cache *after* all nodes have been processed.
+    lastKnownPortalNamesForDropdown = [...finalDropdownNames];
+}
+
+// --- Helper for GetNamedPortal output synchronization ---
+function synchronizeGetPortalOutputs(getNodeInstance) {
+    if (!app.graph || getNodeInstance.comfyClass !== "GetNamedPortal") return;
+
+    const portalName = getPortalNameFromNodeWidget(getNodeInstance);
+    let targetSetNode = null;
+
+    if (portalName && portalName !== PLACEHOLDER_REFRESH && portalName !== PLACEHOLDER_NO_PORTALS) {
+        targetSetNode = app.graph._nodes.find(n =>
+            n.comfyClass === "SetNamedPortal" &&
+            getPortalNameFromNodeWidget(n) === portalName &&
+            n.mode !== (LiteGraph.NODE_MODE_BYPASSED || 4) && n.mode !== 2
+        );
+    }
+
+    let desiredOutputs = [];
+    if (targetSetNode && targetSetNode._actualInputSlotTypes) {
+        targetSetNode._actualInputSlotTypes.forEach((slotInfo) => {
+            if (slotInfo.name.startsWith("value_")) {
+                const outputIndex = parseInt(slotInfo.name.split("_")[1]);
+                desiredOutputs.push({
+                    name: `output_${outputIndex}`,
+                    type: slotInfo.type || "*",
+                    label: `${slotInfo.name} (${slotInfo.type || "*"})`
+                });
             }
         });
     }
-    // console.log("[ComfyPortals] RefreshAllPortalVisuals: Complete.");
-    lastKnownPortalNamesForDropdown = finalDropdownNames;
+    if (desiredOutputs.length === 0) {
+        desiredOutputs.push({ name: "output_1", type: "*", label: "value_1 (*)" });
+    }
+
+    let hasStructuralChanges = false;
+    // Robust sync: remove all, then add all desired if structure differs
+    const currentOutputsSimplified = getNodeInstance.outputs.map(o => ({ name: o.name, type: String(o.type) })); // Ensure type is string for comparison
+    const desiredOutputsSimplified = desiredOutputs.map(d => ({ name: d.name, type: String(d.type) }));
+
+    if (JSON.stringify(currentOutputsSimplified) !== JSON.stringify(desiredOutputsSimplified)) {
+        hasStructuralChanges = true;
+        const oldLinksData = [];
+        if (getNodeInstance.outputs) {
+            getNodeInstance.outputs.forEach((output, index) => {
+                if (output.links && output.links.length > 0) {
+                    output.links.forEach(linkId => {
+                        const link = app.graph.links[linkId];
+                        if (link) {
+                            oldLinksData.push({
+                                originalOutputName: output.name, // Or use index if names are not stable
+                                targetNodeId: link.target_id,
+                                targetSlotIndex: link.target_slot
+                            });
+                        }
+                    });
+                }
+            });
+        }
+
+        while (getNodeInstance.outputs && getNodeInstance.outputs.length > 0) {
+            getNodeInstance.removeOutput(0);
+        }
+        desiredOutputs.forEach(slot => {
+            getNodeInstance.addOutput(slot.name, slot.type, { label: slot.label });
+        });
+
+        if (oldLinksData.length > 0 && getNodeInstance.outputs) {
+            getNodeInstance.outputs.forEach((newOutput, newIndex) => {
+                const correspondingOldLink = oldLinksData.find(oldLink => oldLink.originalOutputName === newOutput.name);
+                if (correspondingOldLink) {
+                    const targetNode = app.graph.getNodeById(correspondingOldLink.targetNodeId);
+                    if (targetNode && !targetNode.inputs[correspondingOldLink.targetSlotIndex].link) {
+                        getNodeInstance.connect(newIndex, targetNode, correspondingOldLink.targetSlotIndex);
+                    }
+                }
+            });
+        }
+    }
+
+    if (hasStructuralChanges) {
+        getNodeInstance.setDirtyCanvas(true, true);
+    }
 }
 
-// --- Temporary Link Management ---
-function createTemporaryPortalLinks(virtualPortalConnections) {
+// --- Temporary Link Management (for multi-links) ---
+function createMultiLinkTemporaryPortalLinks(virtualPortalConnections) {
     const added_temp_link_ids = [];
-    const original_links_to_restore = [];
+    const original_links_to_restore_data = [];
 
     for (const vpc of virtualPortalConnections) {
         const sourceNode = app.graph.getNodeById(vpc.sourceNodeId);
         const destNode = app.graph.getNodeById(vpc.destNodeId);
         if (!sourceNode || !destNode) continue;
 
-        const destInputSlot = destNode.inputs[vpc.destSlotIndex];
-        if (destInputSlot && destInputSlot.link != null) {
-            const originalLink = app.graph.links[destInputSlot.link];
-            if (originalLink && originalLink.origin_id === vpc.getPortalNodeId && originalLink.origin_slot === vpc.getPortalNodeOutputSlotIndex) {
-                original_links_to_restore.push(JSON.parse(JSON.stringify(originalLink)));
-            }
+        const originalLinkObject = app.graph.links[vpc.originalPersistentLinkId];
+        if (originalLinkObject) {
+            original_links_to_restore_data.push({
+                originalLinkId: vpc.originalPersistentLinkId,
+                originNodeId: originalLinkObject.origin_id,
+                originSlotName: vpc.getPortalNodeOutputSlotName,
+                targetNodeId: originalLinkObject.target_id,
+                targetSlotIndex: originalLinkObject.target_slot,
+                type: originalLinkObject.type
+            });
         }
+
         const temp_link_obj = sourceNode.connect(vpc.sourceSlotIndex, destNode, vpc.destSlotIndex);
         if (temp_link_obj && typeof temp_link_obj.id !== 'undefined') {
-            if (app.graph.links[temp_link_obj.id] && app.graph.links[temp_link_obj.id].type !== vpc.linkType) {
-                 app.graph.links[temp_link_obj.id].type = vpc.linkType;
+            const tempLinkInGraph = app.graph.links[temp_link_obj.id];
+            if (tempLinkInGraph) {
+                if (tempLinkInGraph.type !== vpc.linkType) tempLinkInGraph.type = vpc.linkType;
+                added_temp_link_ids.push(temp_link_obj.id);
             }
-            added_temp_link_ids.push(temp_link_obj.id);
         }
     }
     const restorer = function() {
         for (const id of added_temp_link_ids) {
             if (app.graph.links[id]) app.graph.removeLink(id);
         }
-        for (const linkData of original_links_to_restore) {
-            const oNode = app.graph.getNodeById(linkData.origin_id);
-            const tNode = app.graph.getNodeById(linkData.target_id);
-            if (oNode && tNode && !tNode.inputs[linkData.target_slot].link) {
-                oNode.connect(linkData.origin_slot, tNode, linkData.target_slot);
+        for (const linkData of original_links_to_restore_data) {
+            const originNode = app.graph.getNodeById(linkData.originNodeId);
+            const targetNode = app.graph.getNodeById(linkData.targetNodeId);
+            if (originNode && targetNode) {
+                const originSlotIndex = originNode.outputs?.findIndex(o => o.name === linkData.originSlotName);
+                if (typeof originSlotIndex !== 'undefined' && originSlotIndex !== -1) {
+                    if (!targetNode.inputs[linkData.targetSlotIndex].link) {
+                        const restoredLink = originNode.connect(originSlotIndex, targetNode, linkData.targetSlotIndex);
+                        if (restoredLink && app.graph.links[restoredLink.id] && linkData.type) {
+                            app.graph.links[restoredLink.id].type = linkData.type;
+                        }
+                    }
+                }
             }
         }
     };
@@ -203,217 +342,352 @@ function createTemporaryPortalLinks(virtualPortalConnections) {
 
 // --- Main Extension ---
 app.registerExtension({
-    name: "Comfy.ComfyPortals.JS.v24.4", // Version for this iteration
+    name: EXTENSION_VERSION,
 
     async beforeRegisterNodeDef(nodeType, nodeData, appInstance) {
         if (nodeData.name === "Set Named Portal (Input)") {
             const originalOnConnectionsChange = nodeType.prototype.onConnectionsChange;
             nodeType.prototype.onConnectionsChange = function(side, slotIndex, isConnected, linkInfo, ioSlot) {
                 originalOnConnectionsChange?.apply(this, arguments);
-                if (this.comfyClass === "SetNamedPortal" && side === LiteGraph.INPUT && this.inputs[slotIndex]?.name === "value") {
-                    updateSetPortalInfo(this);
-                    setTimeout(refreshAllPortalVisuals, 0);
+                if (this.comfyClass === "SetNamedPortal" && side === LiteGraph.INPUT) {
+                    if (this.inputs && this.inputs[slotIndex] && this.inputs[slotIndex].name.startsWith("value_")) {
+                       // DEFER the update: Crucial for link.type to stabilize after connection event
+                        setTimeout(() => {
+                            updateSetPortalSlotsInfo(nodeInstanceRef); // This will do the structural "nudge"
+                            refreshAllPortalVisuals(); // Refresh other dependent UI
+                        }, 0);
+                    }
+                }
+            };
+            const originalOnPropertyChanged = nodeType.prototype.onPropertyChanged;
+            nodeType.prototype.onPropertyChanged = function(property, value, prev_value) {
+                originalOnPropertyChanged?.apply(this, arguments);
+                if (this.comfyClass === "SetNamedPortal" && property === "widgets_values") {
+                    const portalNameWidget = this.widgets.find(w => w.name === "portal_name");
+                    const widgetIndex = this.widgets.indexOf(portalNameWidget);
+                    if (portalNameWidget && this.widgets_values[widgetIndex] !== prev_value?.[widgetIndex] ) {
+                        setTimeout(refreshAllPortalVisuals, 0);
+                    }
                 }
             };
         }
-
-        // Add onNodeCloned hook for GetNamedPortal
         if (nodeData.name === "Get Named Portal (Output)") {
             nodeType.onNodeCloned = function(originalNode, clonedNode) {
-                // originalNode is the node that was cloned
-                // clonedNode is the new node that was created from the clone operation
-
-                // console.log(`[ComfyPortals] GetNamedPortal cloned: Original ID ${originalNode.id}, New ID ${clonedNode.id}`);
-
-                // The clonedNode will already go through its own `nodeCreated` lifecycle.
-                // In `nodeCreated` for GetNamedPortal, we already:
-                // 1. Ensure its portal_name widget is a combo.
-                // 2. Attach callbacks.
-                // 3. Attempt to populate its dropdown.
-                // 4. Call refreshAllPortalVisuals.
-
-                // So, theoretically, nodeCreated should handle most of it.
-                // However, if there's a very specific state from the original that needs
-                // careful re-initialization on the clone, you could do it here.
-                // For now, just ensuring refreshAllPortalVisuals is called might be enough
-                // to update the panel if the act of cloning changes the "used" portals.
-                // But nodeCreated for the clonedNode should already call it.
-
-                // We can explicitly trigger a refresh for the cloned node's dropdown visuals
-                // in case the timing in its nodeCreated isn't perfect for cloned nodes.
                 setTimeout(() => {
+                    synchronizeGetPortalOutputs(clonedNode);
+                    // Re-populate dropdown for the cloned node
                     const widget = clonedNode.widgets.find(w => w.name === "portal_name");
                     if (widget && widget.type === "combo") {
-                        // Re-fetch latest portal names
                         const setNodes = app.graph._nodes.filter(n => n.comfyClass === "SetNamedPortal" && n.mode !== (LiteGraph.NODE_MODE_BYPASSED || 4) && n.mode !== 2);
                         const availableNames = new Set();
-                        setNodes.forEach(setNode => {
-                            const name = getPortalNameFromNodeWidget(setNode);
-                            if (name) availableNames.add(name);
-                        });
+                        setNodes.forEach(setNode => { const name = getPortalNameFromNodeWidget(setNode); if (name) availableNames.add(name); });
                         const sortedNames = Array.from(availableNames).sort();
                         const finalNames = sortedNames.length > 0 ? sortedNames : [PLACEHOLDER_REFRESH];
-
                         widget.options.values = [...finalNames];
-                        if (!finalNames.includes(widget.value)) {
-                            widget.value = finalNames[0];
-                        }
-                        // Force redraw
-                        const tempVal = widget.value;
-                        widget.value = null;
-                        widget.value = tempVal;
+                        if (!finalNames.includes(widget.value)) widget.value = finalNames[0];
+                        const tempVal = widget.value; widget.value = null; widget.value = tempVal; // Force redraw
                     }
-                    // And a global refresh for the panel
-                    refreshAllPortalVisuals();
-                }, 100); // Slightly longer delay for cloned node to fully initialize
+                    refreshAllPortalVisuals(); // Global refresh
+                }, 150);
             };
         }
     },
 
     async nodeCreated(node, appInstance) {
         if (node.comfyClass === "SetNamedPortal") {
-            // ... (existing SetNamedPortal logic) ...
+            node._dynamicInputCounter = node.inputs?.filter(inp => inp.name.startsWith("value_")).length || 0;
+            if (node._dynamicInputCounter === 0 && node.inputs?.some(inp => inp.name === "value_1")) node._dynamicInputCounter = 1; // Ensure if value_1 exists from definition
+            else if (node._dynamicInputCounter === 0)
+            {
+                const valueInputs = node.inputs?.filter(inp => inp.name.startsWith("value_")) || [];
+                let maxIndex = 0;
+                valueInputs.forEach(inp => {
+                    const index = parseInt(inp.name.split("_")[1]);
+                    if (!isNaN(index) && index > maxIndex) maxIndex = index;
+                });
+                node._dynamicInputCounter = maxIndex || 0; // If no value_ inputs, 0. If value_1 exists, it'll be 1.
+                if (node._dynamicInputCounter === 0 && node.inputs?.some(inp => inp.name === "value_1")) node._dynamicInputCounter = 1;
+                else if (node._dynamicInputCounter === 0 && !node.inputs?.find(i => i.name.startsWith("value_"))) node._dynamicInputCounter = 0; // Truly empty initially
+            } // Default if no value_ inputs yet from definition
+
+            node._actualInputSlotTypes = node._actualInputSlotTypes || [];
+
+            // "+ Add Input" Button (with update to enable remove button)
+            node.addWidget("button", "+ Add Input", null, function() {
+                const selfNode = node;
+                selfNode._dynamicInputCounter = (selfNode._dynamicInputCounter || 0) + 1;
+                const newSlotName = "value_" + selfNode._dynamicInputCounter;
+                selfNode.addInput(newSlotName, "*", { label: newSlotName + " (*)" });
+
+                updateSetPortalSlotsInfo(selfNode); // This handles _actualInputSlotTypes and node redraw
+
+                const portalName = getPortalNameFromNodeWidget(selfNode);
+                if (portalName && app.graph && app.graph._nodes) {
+                    app.graph._nodes.forEach(graphNode => {
+                        if (graphNode.comfyClass === "GetNamedPortal" &&
+                            getPortalNameFromNodeWidget(graphNode) === portalName) {
+                            synchronizeGetPortalOutputs(graphNode);
+                        }
+                    });
+                }
+
+                setTimeout(refreshAllPortalVisuals, 0);
+
+                // Enable the remove button if it's now possible to remove
+                const removeWidget = selfNode.widgets.find(w => w.name === "- Remove Input");
+                if (removeWidget) {
+                    removeWidget.disabled = (selfNode._dynamicInputCounter <= 1);
+                }
+            });
+
+            // "- Remove Input" Button
+            const removeButtonWidget = node.addWidget("button", "- Remove Input", null, function() {
+                const selfNode = node; // 'this' refers to widget, so use selfNode for the LGraphNode
+
+                if (selfNode._dynamicInputCounter <= 1) {
+                    this.disabled = true;
+                    return;
+                }
+
+                const slotNameToRemove = "value_" + selfNode._dynamicInputCounter;
+                let slotIndexToRemove = -1;
+                for (let i = 0; i < selfNode.inputs.length; i++) { // Corrected loop
+                    if (selfNode.inputs[i].name === slotNameToRemove) {
+                        slotIndexToRemove = i;
+                        break;
+                    }
+                }
+
+                if (slotIndexToRemove !== -1) {
+                    selfNode.removeInput(slotIndexToRemove);
+                    selfNode._dynamicInputCounter--;
+
+                    updateSetPortalSlotsInfo(selfNode);
+
+                    const portalName = getPortalNameFromNodeWidget(selfNode);
+                    if (portalName && app.graph && app.graph._nodes) {
+                        app.graph._nodes.forEach(graphNode => {
+                            if (graphNode.comfyClass === "GetNamedPortal" &&
+                                getPortalNameFromNodeWidget(graphNode) === portalName) {
+                                synchronizeGetPortalOutputs(graphNode);
+                            }
+                        });
+                    }
+
+                    if (typeof selfNode.computeSize === 'function' && typeof selfNode.setSize === 'function') {
+                        let newComputedSize = selfNode.computeSize();
+                        if (newComputedSize && Array.isArray(newComputedSize.vec2)) newComputedSize = newComputedSize.vec2;
+                        if (Array.isArray(newComputedSize)) selfNode.setSize(newComputedSize);
+                    }
+                    selfNode.setDirtyCanvas(true, true);
+                    if (selfNode.graph) selfNode.graph.setDirtyCanvas(true, true);
+
+                    setTimeout(refreshAllPortalVisuals, 0);
+                    this.disabled = (selfNode._dynamicInputCounter <= 1);
+                } else {
+                    // ... (resync logic from your script) ...
+                    console.warn(`[ComfyPortals] Slot to remove '${slotNameToRemove}' not found. Resyncing counter.`);
+                    let maxIndex = 0;
+                    selfNode.inputs?.forEach(inp => {
+                        if (inp.name.startsWith("value_")) {
+                            const index = parseInt(inp.name.split("_")[1]);
+                            if (!isNaN(index) && index > maxIndex) maxIndex = index;
+                        }
+                    });
+                    selfNode._dynamicInputCounter = maxIndex;
+                    this.disabled = (selfNode._dynamicInputCounter <= 1);
+                }
+            });
+            // Set initial disabled state for the remove button
+            if (removeButtonWidget) { // Check if widget was successfully created
+                 removeButtonWidget.disabled = (node._dynamicInputCounter <= 1);
+            }
+
+            setTimeout(() => updateSetPortalSlotsInfo(node), 50);
+            const portalNameWidget = node.widgets.find(w => w.name === "portal_name");
+            if (portalNameWidget) {
+                const originalWidgetCallback = portalNameWidget.callback;
+                portalNameWidget.callback = (value, ...args) => {
+                    if (originalWidgetCallback) originalWidgetCallback.call(node, value, ...args);
+                    setTimeout(refreshAllPortalVisuals, 0);
+                };
+            }
         } else if (node.comfyClass === "GetNamedPortal") {
             let portalNameWidgetInstance = node.widgets.find(w => w.name === "portal_name");
             const currentWidgetValue = portalNameWidgetInstance ? portalNameWidgetInstance.value : PLACEHOLDER_REFRESH;
-            let isNewWidget = false;
-
             if (!portalNameWidgetInstance || portalNameWidgetInstance.type !== "combo") {
                 const widgetIndex = portalNameWidgetInstance ? node.widgets.indexOf(portalNameWidgetInstance) : -1;
-                if (widgetIndex > -1) {
-                    node.widgets.splice(widgetIndex, 1);
-                }
+                if (widgetIndex > -1) node.widgets.splice(widgetIndex, 1);
                 portalNameWidgetInstance = node.addWidget("combo", "portal_name", currentWidgetValue, () => {
+                    synchronizeGetPortalOutputs(node);
                     setTimeout(refreshAllPortalVisuals, 0);
-                }, { values: [currentWidgetValue] }); // Initialize with current or placeholder
-                isNewWidget = true;
-                console.log(`[ComfyPortals] GetNamedPortal ${node.id}: portal_name widget ensured/created as COMBO with callback.`);
+                }, { values: [currentWidgetValue] });
             } else {
                 const originalComboCallback = portalNameWidgetInstance.callback;
                 portalNameWidgetInstance.callback = (value, LGraphCanvas, N, pos, event) => {
                     if(originalComboCallback) originalComboCallback.call(node, value, LGraphCanvas, N, pos, event);
+                    synchronizeGetPortalOutputs(node);
                     setTimeout(refreshAllPortalVisuals, 0);
                 };
             }
-
             if (!node.widgets?.find(w => w.name === "Refresh List")) {
                 node.addWidget("button", "Refresh List", null, () => {
                     refreshAllPortalVisuals();
+                    synchronizeGetPortalOutputs(node);
                 }, {});
             }
-
-            // **Immediately populate this new node's dropdown after ensuring it's a combo**
-            // 1. Get current available portal names
-            const setNodes = app.graph._nodes.filter(n => n.comfyClass === "SetNamedPortal" && n.mode !== (LiteGraph.NODE_MODE_BYPASSED || 4) && n.mode !== 2);
-            const availableNames = new Set();
-            setNodes.forEach(setNode => {
-                const name = getPortalNameFromNodeWidget(setNode);
-                if (name) availableNames.add(name);
-            });
-            const sortedNames = Array.from(availableNames).sort();
-            const finalNames = sortedNames.length > 0 ? sortedNames : [PLACEHOLDER_REFRESH];
-
-            // 2. Update the widget of THIS new node
-            portalNameWidgetInstance.options.values = [...finalNames];
-            if (!finalNames.includes(portalNameWidgetInstance.value)) { // If current value is invalid (e.g. placeholder)
-                portalNameWidgetInstance.value = finalNames[0];
-            }
-
-            // 3. Force redraw of this specific node's widget if it was newly created/configured
-            //    or if its value/options were just set.
-            if (isNewWidget || node.setDirtyCanvas) { // isNewWidget helps for the very first creation
-                 const tempVal = portalNameWidgetInstance.value;
-                 portalNameWidgetInstance.value = null; // Force internal update in LiteGraph
-                 portalNameWidgetInstance.value = tempVal;
-                 // node.setDirtyCanvas(true, true); // Might be needed if the above doesn't work
-            }
-
-
-            // This global refresh is still good for other nodes and the panel
-            setTimeout(refreshAllPortalVisuals, 50);
+            setTimeout(() => {
+                refreshAllPortalVisuals();
+                synchronizeGetPortalOutputs(node);
+            }, 100);
         }
     },
 
     async loadedGraphNode(node, appInstance) {
         if (node.comfyClass === "SetNamedPortal") {
-            // ... (SetNamedPortal logic remains the same as v24.3) ...
+            let maxIndex = 0;
+            if (node.inputs) {
+                node.inputs.forEach(inp => {
+                    if (inp.name.startsWith("value_")) {
+                        const index = parseInt(inp.name.split("_")[1]);
+                        if (!isNaN(index) && index > maxIndex) maxIndex = index;
+                    }
+                });
+            }
+            // If no value_ inputs but value_1 is defined (e.g. from node definition before any dynamic adds)
+            if (maxIndex === 0 && node.inputs?.some(inp => inp.name === "value_1")) {
+                maxIndex = 1;
+            }
+            node._dynamicInputCounter = maxIndex;
+            node._actualInputSlotTypes = node._actualInputSlotTypes || [];
+
+            // "+ Add Input" Button (if not present)
+            if (!node.widgets?.find(w => w.name === "+ Add Input")) {
+                node.addWidget("button", "+ Add Input", null, function() {
+                    const selfNode = node;
+                    selfNode._dynamicInputCounter = (selfNode._dynamicInputCounter || 0) + 1;
+                    const newSlotName = "value_" + selfNode._dynamicInputCounter;
+                    selfNode.addInput(newSlotName, "*", { label: newSlotName + " (*)" });
+                    updateSetPortalSlotsInfo(selfNode);
+                    setTimeout(refreshAllPortalVisuals, 0);
+                    const removeWidget = selfNode.widgets.find(w => w.name === "- Remove Input");
+                    if (removeWidget) {
+                        removeWidget.disabled = (selfNode._dynamicInputCounter <= 1);
+                    }
+                });
+            }
+
+             // "- Remove Input" Button (if not present)
+            let removeButtonWidget = node.widgets?.find(w => w.name === "- Remove Input");
+            if (!removeButtonWidget) {
+                removeButtonWidget = node.addWidget("button", "- Remove Input", null, function() {
+                    const selfNode = node;
+                    if (selfNode._dynamicInputCounter <= 1) {
+                        this.disabled = true; return;
+                    }
+                    const slotNameToRemove = "value_" + selfNode._dynamicInputCounter;
+                    let slotIndexToRemove = -1;
+                    for (let i = 0; i < selfNode.inputs.length; i++) {
+                        if (selfNode.inputs[i].name === slotNameToRemove) slotIndexToRemove = i; break;
+                    }
+                    if (slotIndexToRemove !== -1) {
+                        selfNode.removeInput(slotIndexToRemove);
+                        selfNode._dynamicInputCounter--;
+                        updateSetPortalSlotsInfo(selfNode);
+                        setTimeout(refreshAllPortalVisuals, 0);
+                        this.disabled = (selfNode._dynamicInputCounter <= 1);
+                    } else {
+                        console.warn(`[ComfyPortals] LoadedNode: Slot to remove '${slotNameToRemove}' not found. Resyncing.`);
+                        let currentMaxIndex = 0;
+                        selfNode.inputs?.forEach(inp => {
+                            if (inp.name.startsWith("value_")) {
+                                const indexVal = parseInt(inp.name.split("_")[1]);
+                                if (!isNaN(indexVal) && indexVal > currentMaxIndex) currentMaxIndex = indexVal;
+                            }
+                        });
+                        selfNode._dynamicInputCounter = currentMaxIndex;
+                        this.disabled = (selfNode._dynamicInputCounter <= 1);
+                    }
+                });
+            }
+            // Set initial disabled state for the remove button on loaded nodes
+            if (removeButtonWidget) {
+                removeButtonWidget.disabled = (node._dynamicInputCounter <= 1);
+            }
+
+            setTimeout(() => updateSetPortalSlotsInfo(node), 100);
+            const portalNameWidget = node.widgets.find(w => w.name === "portal_name");
+            if (portalNameWidget && (!portalNameWidget.callback || !portalNameWidget.callback.toString().includes("refreshAllPortalVisuals"))) {
+                const originalWidgetCallback = portalNameWidget.callback;
+                portalNameWidget.callback = (value, ...args) => {
+                    if (originalWidgetCallback) originalWidgetCallback.call(node, value, ...args);
+                    setTimeout(refreshAllPortalVisuals, 0);
+                };
+            }
         } else if (node.comfyClass === "GetNamedPortal") {
             let portalNameWidgetInstance = node.widgets.find(w => w.name === "portal_name");
             const loadedWidgetValue = portalNameWidgetInstance ? portalNameWidgetInstance.value : PLACEHOLDER_REFRESH;
-
             if (!portalNameWidgetInstance || portalNameWidgetInstance.type !== "combo") {
                 const widgetIndex = portalNameWidgetInstance ? node.widgets.indexOf(portalNameWidgetInstance) : -1;
-                if (widgetIndex > -1) {
-                    node.widgets.splice(widgetIndex, 1);
-                }
+                if (widgetIndex > -1) node.widgets.splice(widgetIndex, 1);
                 portalNameWidgetInstance = node.addWidget("combo", "portal_name", loadedWidgetValue, () => {
+                    synchronizeGetPortalOutputs(node);
                     setTimeout(refreshAllPortalVisuals, 0);
                 }, { values: [loadedWidgetValue] });
-                console.log(`[ComfyPortals] GetNamedPortal ${node.id} (loaded): portal_name widget ensured/created as COMBO with callback.`);
             } else {
-                 // Ensure existing combo has the callback if it was lost during serialization or not set by an older version
-                if (!portalNameWidgetInstance.callback || !portalNameWidgetInstance.callback.toString().includes("refreshAllPortalVisuals")) {
+                if (!portalNameWidgetInstance.callback || !portalNameWidgetInstance.callback.toString().includes("synchronizeGetPortalOutputs")) {
                     const originalComboCallback = portalNameWidgetInstance.callback;
                     portalNameWidgetInstance.callback = (value, LGraphCanvas, N, pos, event) => {
                         if(originalComboCallback) originalComboCallback.call(node, value, LGraphCanvas, N, pos, event);
+                        synchronizeGetPortalOutputs(node);
                         setTimeout(refreshAllPortalVisuals, 0);
                     };
                 }
             }
-
             if (!node.widgets?.find(w => w.name === "Refresh List")) {
-                node.addWidget("button", "Refresh List", null, () => refreshAllPortalVisuals(), {});
+                node.addWidget("button", "Refresh List", null, () => {
+                    refreshAllPortalVisuals();
+                    synchronizeGetPortalOutputs(node);
+                }, {});
             }
-            // The main refresh in setup will populate it after all nodes are loaded.
+            setTimeout(() => {
+                synchronizeGetPortalOutputs(node);
+            }, 200);
         }
     },
 
     async setup(appInstance) {
-        console.log("[ComfyPortals] Setting up with Floating Button (v24.3).");
-
+        console.log(`[ComfyPortals] Setting up with Floating Button (${EXTENSION_VERSION}).`);
         try {
             portalPanelInstance = initializePortalManagerUI();
-            if (!portalPanelInstance) {
-                console.error("[ComfyPortals] Failed to initialize PortalManagerPanel instance.");
-                return;
-            }
+            if (!portalPanelInstance) { console.error("[ComfyPortals] Failed to initialize PortalManagerPanel instance."); return; }
         } catch (e) { console.error("[ComfyPortals] Error initializing PortalManagerPanel:", e); return; }
 
         const floatingButton = document.createElement("button");
         floatingButton.id = "comfyportals-floating-toggle-button";
-        floatingButton.textContent = "P";
+        floatingButton.textContent = "P"; // Changed from "P"
         floatingButton.title = "Toggle Portals List";
-        Object.assign(floatingButton.style, { /* ... your floating button styles ... */
+        Object.assign(floatingButton.style, {
             position: 'fixed', top: '100px', right: '300px', zIndex: '1005',
-            padding: '10px 15px', backgroundColor: 'var(--comfy-menu-bg)', color: 'var(--fg-color)',
-            border: '1px solid var(--border-color)', borderRadius: '50%', cursor: 'pointer',
-            boxShadow: '0px 2px 10px rgba(0,0,0,0.3)', fontSize: '16px',
-            width: '45px', height: '45px', display: 'flex', alignItems: 'center', justifyContent: 'center'
+            padding: '8px 12px', backgroundColor: 'var(--comfy-menu-bg)', color: 'var(--fg-color)',
+            border: '1px solid var(--border-color)', borderRadius: '8px', cursor: 'pointer', // Pill shape
+            boxShadow: '0px 2px 10px rgba(0,0,0,0.3)', fontSize: '14px',
+            height: 'auto', width: 'auto', // Auto size based on content
+            display: 'flex', alignItems: 'center', justifyContent: 'center'
         });
-        floatingButton.onclick = () => { /* ... toggle panel and refresh ... */
-            if (portalPanelInstance) {
-                portalPanelInstance.toggle();
-                if (portalPanelInstance.element.style.display !== "none") {
-                    refreshAllPortalVisuals();
-                }
-            }
-        };
-        // Draggable logic for floatingButton (as previously defined)
+        floatingButton.onclick = () => { if (portalPanelInstance) { portalPanelInstance.toggle(); if (portalPanelInstance.element.style.display !== "none") { refreshAllPortalVisuals(); }}};
         let isDraggingButton = false, btnOffsetX, btnOffsetY;
         floatingButton.onmousedown = (e) => { isDraggingButton = true; floatingButton.style.cursor = 'grabbing'; btnOffsetX = e.clientX - floatingButton.offsetLeft; btnOffsetY = e.clientY - floatingButton.offsetTop; document.body.style.userSelect = 'none'; e.preventDefault(); };
         document.onmousemove = (e) => { if (!isDraggingButton) return; floatingButton.style.left = `${e.clientX - btnOffsetX}px`; floatingButton.style.top = `${e.clientY - btnOffsetY}px`; };
         document.onmouseup = () => { if (isDraggingButton) { isDraggingButton = false; floatingButton.style.cursor = 'pointer'; document.body.style.userSelect = ''; }};
-
-        try {
-            document.body.appendChild(floatingButton);
-            console.log("[ComfyPortals] Floating 'Portals' button added.");
-        } catch (e) { console.error("[ComfyPortals] Error appending floating button:", e); }
+        try { document.body.appendChild(floatingButton); console.log("[ComfyPortals] Floating 'Portal' button added."); }
+        catch (e) { console.error("[ComfyPortals] Error appending floating button:", e); }
 
         try {
             const originalOnNodeRemoved = LGraph.prototype.onNodeRemoved;
             LGraph.prototype.onNodeRemoved = function(node) {
                 const res = originalOnNodeRemoved?.apply(this, arguments);
-                if (node && node.comfyClass === "SetNamedPortal" || node.comfyClass === "GetNamedPortal") {
+                if (node && (node.comfyClass === "SetNamedPortal" || node.comfyClass === "GetNamedPortal")) {
                     setTimeout(refreshAllPortalVisuals, 0);
                 }
                 return res;
@@ -423,9 +697,10 @@ app.registerExtension({
 
         try {
             const originalGraphToPrompt = app.graphToPrompt;
-            if (!originalGraphToPrompt) { console.error("[ComfyPortals] original app.graphToPrompt not defined!"); }
+            if (!originalGraphToPrompt) { console.error("[ComfyPortals] original app.graphToPrompt not defined! Cannot patch."); }
             else {
                 app.graphToPrompt = async function() {
+                    console.log("[ComfyPortals] Patched graphToPrompt: Analyzing multi-links.");
                     const currentGraph = app.graph;
                     if (!currentGraph) { console.error("[ComfyPortals] app.graph not in graphToPrompt. Calling original."); return await originalGraphToPrompt.apply(app, arguments); }
 
@@ -433,58 +708,68 @@ app.registerExtension({
                     const NODE_MODE_NEVER = 2;
                     const liveGetters = currentGraph._nodes.filter(n => n.comfyClass === "GetNamedPortal" && n.mode !== NODE_MODE_BYPASSED && n.mode !== NODE_MODE_NEVER);
                     const liveSetters = currentGraph._nodes.filter(n => n.comfyClass === "SetNamedPortal" && n.mode !== NODE_MODE_BYPASSED && n.mode !== NODE_MODE_NEVER);
-                    const virtualPortalConnections = [];
+                    let allVirtualPortalConnections = [];
 
                     for (const getNode of liveGetters) {
                         const portalName = getPortalNameFromNodeWidget(getNode);
                         if (!portalName || portalName === PLACEHOLDER_NO_PORTALS || portalName === PLACEHOLDER_REFRESH) continue;
                         const setNode = liveSetters.find(s => getPortalNameFromNodeWidget(s) === portalName);
-                        if (!setNode) { console.warn(`[ComfyPortals] No active SetPortal for '${portalName}' (GetNode ${getNode.id})`); continue; }
-                        const setNodeValueInput = setNode.inputs?.find(i => i.name === "value");
-                        if (!setNodeValueInput?.link) continue;
-                        let sourceLink = currentGraph.links[setNodeValueInput.link];
-                        if (!sourceLink) continue;
-                        if (currentGraph.handle_bypass) sourceLink = currentGraph.handle_bypass(sourceLink) || sourceLink;
-                        if (!sourceLink) continue;
-                        const trueSourceNode = currentGraph.getNodeById(sourceLink.origin_id);
-                        const trueSourceSlotIndex = sourceLink.origin_slot;
-                        const actualDataType = setNode._actualDataType || trueSourceNode?.outputs?.[trueSourceSlotIndex]?.type || "*";
-                        if (!trueSourceNode || typeof trueSourceSlotIndex === 'undefined') continue;
-                        const getNodeValueOutput = getNode.outputs?.find(o => o.name === "value");
-                        if (!getNodeValueOutput?.links?.length) continue;
-                        for (const outLinkIdx of getNodeValueOutput.links) {
-                            const persistentLink = currentGraph.links[outLinkIdx];
-                            if (!persistentLink) continue;
-                            const trueDestNode = currentGraph.getNodeById(persistentLink.target_id);
-                            const trueDestSlotIndex = persistentLink.target_slot;
-                            if (trueDestNode && typeof trueDestSlotIndex !== 'undefined' && trueDestNode.mode !== NODE_MODE_BYPASSED && trueDestNode.mode !== NODE_MODE_NEVER) {
-                                virtualPortalConnections.push({
-                                    sourceNodeId: trueSourceNode.id, sourceSlotIndex: trueSourceSlotIndex,
-                                    destNodeId: trueDestNode.id, destSlotIndex: trueDestSlotIndex,
-                                    linkType: actualDataType, getPortalNodeId: getNode.id,
-                                    getPortalNodeOutputSlotIndex: getNode.outputs.indexOf(getNodeValueOutput)
-                                });
+                        if (!setNode) { console.warn(`[ComfyPortals] No active SetNamedPortal for '${portalName}' (GetNode ${getNode.id})`); continue; }
+                        if (!setNode._actualInputSlotTypes || setNode._actualInputSlotTypes.length === 0) { console.warn(`[ComfyPortals] SetNamedPortal ${setNode.id} ('${portalName}') has no _actualInputSlotTypes.`); continue; }
+
+                        for (const setInputSlotInfo of setNode._actualInputSlotTypes) {
+                            if (!setInputSlotInfo.name.startsWith("value_")) continue;
+                            const setPortalInputName = setInputSlotInfo.name;
+                            const actualDataType = setInputSlotInfo.type;
+                            const setNodeInputSlot = setNode.inputs?.find(i => i.name === setPortalInputName);
+                            if (!setNodeInputSlot || setNodeInputSlot.link == null) { console.log(`[ComfyPortals] Input '${setPortalInputName}' on SetNode '${setNode.id}' unconnected.`); continue; }
+                            let sourceLink = currentGraph.links[setNodeInputSlot.link];
+                            if (!sourceLink) continue;
+                            if (currentGraph.handle_bypass) sourceLink = currentGraph.handle_bypass(sourceLink) || sourceLink;
+                            if (!sourceLink) continue;
+                            const trueSourceNode = currentGraph.getNodeById(sourceLink.origin_id);
+                            const trueSourceSlotIndex = sourceLink.origin_slot;
+                            if (!trueSourceNode || typeof trueSourceSlotIndex === 'undefined') { console.warn(`[ComfyPortals] No true source for ${setNode.id}.${setPortalInputName}`); continue; }
+                            const inputIndex = setPortalInputName.split("_")[1];
+                            const getPortalOutputName = `output_${inputIndex}`;
+                            const getNodeOutputSlot = getNode.outputs?.find(o => o.name === getPortalOutputName);
+                            if (!getNodeOutputSlot) { console.warn(`[ComfyPortals] GetNode ${getNode.id} missing output '${getPortalOutputName}'.`); continue; }
+                            if (getNodeOutputSlot.links && getNodeOutputSlot.links.length > 0) {
+                                for (const outLinkIdx of getNodeOutputSlot.links) {
+                                    const persistentLink = currentGraph.links[outLinkIdx];
+                                    if (!persistentLink) continue;
+                                    const trueDestNode = currentGraph.getNodeById(persistentLink.target_id);
+                                    const trueDestSlotIndex = persistentLink.target_slot;
+                                    if (trueDestNode && typeof trueDestSlotIndex !== 'undefined' && trueDestNode.mode !== NODE_MODE_BYPASSED && trueDestNode.mode !== NODE_MODE_NEVER) {
+                                        allVirtualPortalConnections.push({
+                                            sourceNodeId: trueSourceNode.id, sourceSlotIndex: trueSourceSlotIndex,
+                                            destNodeId: trueDestNode.id, destSlotIndex: trueDestSlotIndex,
+                                            linkType: actualDataType, getPortalNodeId: getNode.id,
+                                            getPortalNodeOutputSlotName: getPortalOutputName, originalPersistentLinkId: persistentLink.id
+                                        });
+                                    }
+                                }
                             }
                         }
                     }
-                    const linkMods = createTemporaryPortalLinks(virtualPortalConnections);
+                    // console.log("[ComfyPortals] VPCs for multi-link:", allVirtualPortalConnections);
+                    const linkMods = createMultiLinkTemporaryPortalLinks(allVirtualPortalConnections);
                     let promptResult;
                     try { promptResult = await originalGraphToPrompt.apply(app, arguments); }
                     finally { linkMods.restorer(); if(app.graph) app.graph.setDirtyCanvas(true,true); }
                     return promptResult;
                 };
-                console.log("[ComfyPortals] app.graphToPrompt patched.");
+                console.log("[ComfyPortals] app.graphToPrompt patched for multi-link portals.");
             }
         } catch (e) { console.error("[ComfyPortals] Error patching app.graphToPrompt:", e); }
 
         try {
             setTimeout(() => {
                 if (app.graph) { refreshAllPortalVisuals(); }
-                else { console.warn("[ComfyPortals] app.graph not ready for initial refresh. Relies on node interactions."); }
+                else { console.warn("[ComfyPortals] app.graph not ready for initial refresh."); }
             }, 1000);
         } catch (e) { console.error("[ComfyPortals] Error in initial refreshAllPortalVisuals timeout:", e); }
-
-        console.log("[ComfyPortals] Floating button setup complete.");
+        console.log(`[ComfyPortals] Floating button setup complete (${EXTENSION_VERSION}).`);
     }
 });
-console.log("[ComfyPortals.JS] Script loaded (v24.4 - Floating Button, STRING GetPortal Fix - at end).");
+console.log(`[ComfyPortals.JS] Script loaded (${EXTENSION_VERSION} - at end).`);
