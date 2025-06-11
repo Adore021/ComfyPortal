@@ -381,14 +381,14 @@ app.registerExtension({
 
         const floatingButton = document.createElement("button");
         floatingButton.id = "comfyportals-floating-toggle-button";
-        floatingButton.textContent = "PORTAL";
+        floatingButton.textContent = "P";
         floatingButton.title = "Toggle Portals List";
         Object.assign(floatingButton.style, { /* ... your floating button styles ... */
             position: 'fixed', top: '100px', right: '300px', zIndex: '1005',
             padding: '10px 15px', backgroundColor: 'var(--comfy-menu-bg)', color: 'var(--fg-color)',
-            border: '1px solid var(--border-color)', borderRadius: '10%', cursor: 'pointer',
+            border: '1px solid var(--border-color)', borderRadius: '50%', cursor: 'pointer',
             boxShadow: '0px 2px 10px rgba(0,0,0,0.3)', fontSize: '16px',
-            width: '90px', height: '45px', display: 'flex', alignItems: 'center', justifyContent: 'center'
+            width: '45px', height: '45px', display: 'flex', alignItems: 'center', justifyContent: 'center'
         });
         floatingButton.onclick = () => { /* ... toggle panel and refresh ... */
             if (portalPanelInstance) {
