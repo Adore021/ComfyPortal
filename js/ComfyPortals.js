@@ -668,18 +668,66 @@ app.registerExtension({
         floatingButton.textContent = "P"; // Changed from "P"
         floatingButton.title = "Toggle Portals List";
         Object.assign(floatingButton.style, {
-            position: 'fixed', top: '100px', right: '300px', zIndex: '1005',
-            padding: '8px 12px', backgroundColor: 'var(--comfy-menu-bg)', color: 'var(--fg-color)',
-            border: '1px solid var(--border-color)', borderRadius: '8px', cursor: 'pointer', // Pill shape
-            boxShadow: '0px 2px 10px rgba(0,0,0,0.3)', fontSize: '14px',
-            height: 'auto', width: 'auto', // Auto size based on content
-            display: 'flex', alignItems: 'center', justifyContent: 'center'
+            position: 'fixed',
+            top: '100px', // Initial top position
+            right: '300px', // Initial right position
+            zIndex: '1005',
+            padding: '8px 12px',
+            backgroundColor: 'var(--comfy-menu-bg)',
+            color: 'var(--fg-color)',
+            border: '1px solid var(--border-color)',
+            borderRadius: '50%',
+            cursor: 'pointer',
+            boxShadow: '0px 2px 10px rgba(0,0,0,0.3)',
+            fontSize: '14px',
+            height: 'auto',
+            width: 'auto',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center'
         });
         floatingButton.onclick = () => { if (portalPanelInstance) { portalPanelInstance.toggle(); if (portalPanelInstance.element.style.display !== "none") { refreshAllPortalVisuals(); }}};
-        let isDraggingButton = false, btnOffsetX, btnOffsetY;
-        floatingButton.onmousedown = (e) => { isDraggingButton = true; floatingButton.style.cursor = 'grabbing'; btnOffsetX = e.clientX - floatingButton.offsetLeft; btnOffsetY = e.clientY - floatingButton.offsetTop; document.body.style.userSelect = 'none'; e.preventDefault(); };
-        document.onmousemove = (e) => { if (!isDraggingButton) return; floatingButton.style.left = `${e.clientX - btnOffsetX}px`; floatingButton.style.top = `${e.clientY - btnOffsetY}px`; };
-        document.onmouseup = () => { if (isDraggingButton) { isDraggingButton = false; floatingButton.style.cursor = 'pointer'; document.body.style.userSelect = ''; }};
+
+        let isDraggingButton = false;
+        let initialButtonLeft, initialButtonTop; // To store button's position at drag start
+        let dragStartX, dragStartY; // To store mouse's position at drag start
+
+        floatingButton.onmousedown = (e) => {
+            isDraggingButton = true;
+            floatingButton.style.cursor = 'grabbing';
+            document.body.style.userSelect = 'none'; // Prevent text selection during drag
+            e.preventDefault(); // Prevent default drag behaviors (e.g., image ghosting)
+
+            const rect = floatingButton.getBoundingClientRect();
+            initialButtonLeft = rect.left;
+            initialButtonTop = rect.top;
+
+            dragStartX = e.clientX;
+            dragStartY = e.clientY;
+
+            floatingButton.style.right = ''; // Remove 'right' positioning
+            floatingButton.style.left = `${initialButtonLeft}px`;
+            floatingButton.style.top = `${initialButtonTop}px`;
+        };
+
+        document.onmousemove = (e) => {
+            if (!isDraggingButton) return;
+
+            const deltaX = e.clientX - dragStartX;
+            const deltaY = e.clientY - dragStartY;
+
+            floatingButton.style.left = `${initialButtonLeft + deltaX}px`;
+            floatingButton.style.top = `${initialButtonTop + deltaY}px`;
+        };
+
+        document.onmouseup = () => {
+            if (isDraggingButton) {
+                isDraggingButton = false;
+                floatingButton.style.cursor = 'pointer';
+                document.body.style.userSelect = ''; // Re-enable text selection
+            }
+        };
+
         try { document.body.appendChild(floatingButton); console.log("[ComfyPortals] Floating 'Portal' button added."); }
         catch (e) { console.error("[ComfyPortals] Error appending floating button:", e); }
 
