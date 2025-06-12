@@ -26,39 +26,74 @@ function updateSetPortalSlotsInfo(nodeInstance) {
     let hasChanges = false;
     const newActualInputSlotTypes = [];
 
-    // Update labels and types for existing inputs
     nodeInstance.inputs.forEach((inputSlot) => {
         if (inputSlot.name.startsWith("value_")) {
-            // ... (type determination logic from your previous script) ...
-            let determinedType = "*";
+            let determinedType = "*";    // The actual data type of the connection/slot
+            let labelDescriptor = "*"; // The text to display in parentheses in the label
             let currentLink = null;
-            if (inputSlot.link != null && app.graph.links[inputSlot.link]) { /* ... */ determinedType = "..."; } // Simplified for brevity
-            // (Full type determination logic as in your script)
+
+            // --- Automatic Labeling ---
             if (inputSlot.link != null && app.graph.links[inputSlot.link]) {
                 currentLink = app.graph.links[inputSlot.link];
                 const originNode = app.graph.getNodeById(currentLink.origin_id);
-                if (originNode && typeof currentLink.origin_slot !== 'undefined' && originNode.outputs && originNode.outputs[currentLink.origin_slot]) {
+
+                if (originNode && typeof currentLink.origin_slot !== 'undefined' &&
+                    originNode.outputs && originNode.outputs[currentLink.origin_slot]) {
+
                     const originSlot = originNode.outputs[currentLink.origin_slot];
                     determinedType = originSlot.type || "*";
-                    if (currentLink.type && currentLink.type !== "*" && currentLink.type !== "ಪ್ಲೇಸ್холడర్") determinedType = currentLink.type;
-                    if (currentLink.type !== determinedType) currentLink.type = determinedType;
+
+                    // Prefer source slot's specific name if available and meaningful
+                    if (originSlot.name && originSlot.name !== "*" &&
+                        !originSlot.name.toLowerCase().startsWith("output_") && // Avoid generic "output_N"
+                        originSlot.name.toUpperCase() !== determinedType.toUpperCase()) { // Avoid redundant "MODEL (MODEL)"
+                        labelDescriptor = originSlot.name;
+                    } else {
+                        labelDescriptor = determinedType; // Fallback to data type
+                    }
+
+                    if (currentLink.type !== determinedType && determinedType !== "ಪ್ಲೇಸ್холడర్") { // Avoid ComfyUI's internal placeholder type
+                        currentLink.type = determinedType;
+                    }
                 } else if (currentLink && currentLink.type && currentLink.type !== "*" && currentLink.type !== "ಪ್ಲೇಸ್холడర్") {
-                    determinedType = currentLink.type;
+                    determinedType = currentLink.type; // Fallback to link type
+                    labelDescriptor = determinedType;
+                } else { // Link exists but type info is incomplete
+                    determinedType = "*";
+                    labelDescriptor = "*";
                 }
-            } else {
-                determinedType = "*";
+            } else { // No link connected
+                determinedType = inputSlot.type || "*"; // Should be '*' for unconnected dynamic inputs
+                labelDescriptor = (determinedType === "*") ? "*" : determinedType; // Show "*" or the base type
+            }
+            // --- End Automatic Labeling ---
+
+            // Construct and apply the new label
+            const newLabel = `${inputSlot.name} (${labelDescriptor})`;
+            if (inputSlot.label !== newLabel) {
+                inputSlot.label = newLabel;
+                hasChanges = true;
             }
 
-            const newLabel = `${inputSlot.name} (${determinedType})`;
-            if (inputSlot.label !== newLabel) { inputSlot.label = newLabel; hasChanges = true; }
-            if (inputSlot.type !== determinedType) { inputSlot.type = determinedType; hasChanges = true; }
-            newActualInputSlotTypes.push({ name: inputSlot.name, type: inputSlot.type, originalType: "*" });
+            // Update the slot's actual data type (important for connection coloring and graph logic)
+            if (inputSlot.type !== determinedType) {
+                inputSlot.type = determinedType;
+                hasChanges = true;
+            }
+
+            newActualInputSlotTypes.push({
+                name: inputSlot.name,         // e.g., "value_1"
+                type: determinedType,       // e.g., "MODEL"
+                descriptor: labelDescriptor,  // e.g., "MODEL" or "STEPS" or custom manual label if we re-add it
+                originalType: "*"           // Base type of the dynamic slot
+            });
+
         } else if (inputSlot.name === "portal_name") {
             newActualInputSlotTypes.push({ name: inputSlot.name, type: "STRING", originalType: "STRING" });
         }
     });
 
-    // Update _actualInputSlotTypes and check if it changed
+    // Update the node's internal tracking of types (_actualInputSlotTypes)
     const oldActualInputSlotTypes = nodeInstance._actualInputSlotTypes || [];
     if (newActualInputSlotTypes.length !== oldActualInputSlotTypes.length ||
         !newActualInputSlotTypes.every((s, i) => oldActualInputSlotTypes[i] && s.name === oldActualInputSlotTypes[i].name && s.type === oldActualInputSlotTypes[i].type)) {
@@ -67,16 +102,15 @@ function updateSetPortalSlotsInfo(nodeInstance) {
     }
 
     if (hasChanges) {
+        // Standard refresh calls
         nodeInstance.setDirtyCanvas(true, true);
         if (nodeInstance.graph) {
             if (typeof nodeInstance.graph.onNodeInputsChanged === 'function') {
                 nodeInstance.graph.onNodeInputsChanged(nodeInstance);
             }
-            // If updateSetPortalSlotsInfo itself needs to resize (e.g., label text length changed drastically)
-            // it can still do so. But for removal, the button callback will be more explicit.
             if (typeof nodeInstance.computeSize === 'function' && typeof nodeInstance.setSize === 'function') {
                 let newSize = nodeInstance.computeSize();
-                if (newSize && Array.isArray(newSize.vec2)) newSize = newSize.vec2; // Handle LVector
+                if (newSize && Array.isArray(newSize.vec2)) newSize = newSize.vec2;
                 if (Array.isArray(newSize)) nodeInstance.setSize(newSize);
             }
             if (typeof nodeInstance.graph.setDirtyCanvas === 'function') {
@@ -222,27 +256,35 @@ function synchronizeGetPortalOutputs(getNodeInstance) {
     // Determine the desired outputs based on the linked SetNamedPortal
     let desiredOutputs = [];
     if (targetSetNode && targetSetNode._actualInputSlotTypes) {
-        targetSetNode._actualInputSlotTypes.forEach((slotInfo) => {
-            if (slotInfo.name.startsWith("value_")) {
-                const outputIndex = parseInt(slotInfo.name.split("_")[1]);
+        targetSetNode._actualInputSlotTypes.forEach((slotInfo) => { // slotInfo is from SetNode's _actualInputSlotTypes
+            if (slotInfo.name.startsWith("value_")) { // e.g., slotInfo.name is "value_4", slotInfo.descriptor is "STEPS"
+                const valueIndex = slotInfo.name.substring("value_".length); // e.g., "4"
+                const outputSlotName = `output_${valueIndex}`;      // e.g., "output_4" (internal name for the GetNode output slot)
+                const outputLabelPrefix = `value_${valueIndex}`;  // e.g., "value_4" (prefix for the displayed label)
+
+                // Use the descriptor from SetNamedPortal's slotInfo for the GetNamedPortal's output label
+                const descriptorToUse = slotInfo.descriptor || slotInfo.type || "*"; // e.g., "STEPS"
+                const labelForGetNode = `${outputLabelPrefix} (${descriptorToUse})`; // e.g., "value_4 (STEPS)"
+
                 desiredOutputs.push({
-                    name: `output_${outputIndex}`, // Consistent naming like output_1, output_2
-                    type: slotInfo.type || "*",
-                    label: `${slotInfo.name} (${slotInfo.type || "*"})`
+                    name: outputSlotName,         // Internal name for the slot, e.g., "output_4"
+                    type: slotInfo.type || "*",   // Actual data type for connection coloring, e.g., "INT"
+                    label: labelForGetNode        // Displayed label, e.g., "value_4 (STEPS)"
                 });
             }
         });
     }
+
     if (desiredOutputs.length === 0) { // Default output if no target or no value_ inputs
         desiredOutputs.push({ name: "output_1", type: "*", label: "value_1 (*)" });
     }
 
-    // Check if the current output structure matches the desired one
+    // Check if the current output structure matches the desired one (including labels)
     let hasStructuralChanges = false;
-    const currentOutputsSimplified = getNodeInstance.outputs ? getNodeInstance.outputs.map(o => ({ name: o.name, type: String(o.type) })) : [];
-    const desiredOutputsSimplified = desiredOutputs.map(d => ({ name: d.name, type: String(d.type) }));
+    const currentOutputsForCompare = getNodeInstance.outputs ? getNodeInstance.outputs.map(o => ({ name: o.name, type: String(o.type), label: o.label })) : [];
+    const desiredOutputsForCompare = desiredOutputs.map(d => ({ name: d.name, type: String(d.type), label: d.label }));
 
-    if (JSON.stringify(currentOutputsSimplified) !== JSON.stringify(desiredOutputsSimplified)) {
+    if (JSON.stringify(currentOutputsForCompare) !== JSON.stringify(desiredOutputsForCompare)) {
         hasStructuralChanges = true;
 
         // Collect ALL old links with precise source information
@@ -374,9 +416,9 @@ app.registerExtension({
                 originalOnConnectionsChange?.apply(this, arguments);
                 if (this.comfyClass === "SetNamedPortal" && side === LiteGraph.INPUT) {
                     if (this.inputs && this.inputs[slotIndex] && this.inputs[slotIndex].name.startsWith("value_")) {
-                       // DEFER the update: Crucial for link.type to stabilize after connection event
+                       const selfNodeInstance  = this;
                         setTimeout(() => {
-                            updateSetPortalSlotsInfo(nodeInstanceRef); // This will do the structural "nudge"
+                            updateSetPortalSlotsInfo(selfNodeInstance ); // This will do the structural "nudge"
                             refreshAllPortalVisuals(); // Refresh other dependent UI
                         }, 0);
                     }
@@ -394,6 +436,7 @@ app.registerExtension({
                 }
             };
         }
+
         if (nodeData.name === "Get Named Portal (Output)") {
             nodeType.onNodeCloned = function(originalNode, clonedNode) {
                 setTimeout(() => {
@@ -673,9 +716,8 @@ app.registerExtension({
                     synchronizeGetPortalOutputs(node);
                 }, {});
             }
-            setTimeout(() => {
-                synchronizeGetPortalOutputs(node);
-            }, 200);
+
+            setTimeout(() => {synchronizeGetPortalOutputs(node);}, 500);
         }
     },
 
