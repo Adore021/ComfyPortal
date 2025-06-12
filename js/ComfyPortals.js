@@ -219,41 +219,47 @@ function synchronizeGetPortalOutputs(getNodeInstance) {
         );
     }
 
+    // Determine the desired outputs based on the linked SetNamedPortal
     let desiredOutputs = [];
     if (targetSetNode && targetSetNode._actualInputSlotTypes) {
         targetSetNode._actualInputSlotTypes.forEach((slotInfo) => {
             if (slotInfo.name.startsWith("value_")) {
                 const outputIndex = parseInt(slotInfo.name.split("_")[1]);
                 desiredOutputs.push({
-                    name: `output_${outputIndex}`,
+                    name: `output_${outputIndex}`, // Consistent naming like output_1, output_2
                     type: slotInfo.type || "*",
                     label: `${slotInfo.name} (${slotInfo.type || "*"})`
                 });
             }
         });
     }
-    if (desiredOutputs.length === 0) {
+    if (desiredOutputs.length === 0) { // Default output if no target or no value_ inputs
         desiredOutputs.push({ name: "output_1", type: "*", label: "value_1 (*)" });
     }
 
+    // Check if the current output structure matches the desired one
     let hasStructuralChanges = false;
-    // Robust sync: remove all, then add all desired if structure differs
-    const currentOutputsSimplified = getNodeInstance.outputs.map(o => ({ name: o.name, type: String(o.type) })); // Ensure type is string for comparison
+    const currentOutputsSimplified = getNodeInstance.outputs ? getNodeInstance.outputs.map(o => ({ name: o.name, type: String(o.type) })) : [];
     const desiredOutputsSimplified = desiredOutputs.map(d => ({ name: d.name, type: String(d.type) }));
 
     if (JSON.stringify(currentOutputsSimplified) !== JSON.stringify(desiredOutputsSimplified)) {
         hasStructuralChanges = true;
+
+        // Collect ALL old links with precise source information
         const oldLinksData = [];
         if (getNodeInstance.outputs) {
-            getNodeInstance.outputs.forEach((output, index) => {
-                if (output.links && output.links.length > 0) {
-                    output.links.forEach(linkId => {
+            getNodeInstance.outputs.forEach((outputSlot, outputSlotIndex) => { // outputSlotIndex is 0-based
+                if (outputSlot.links && outputSlot.links.length > 0) {
+                    outputSlot.links.forEach(linkId => {
                         const link = app.graph.links[linkId];
                         if (link) {
                             oldLinksData.push({
-                                originalOutputName: output.name, // Or use index if names are not stable
+                                // Store by original name and index for robust matching
+                                originalOutputName: outputSlot.name,
+                                originalOutputSlotIndex: outputSlotIndex, // Numeric index
                                 targetNodeId: link.target_id,
-                                targetSlotIndex: link.target_slot
+                                targetSlotIndex: link.target_slot,
+                                linkType: link.type // Preserve the link's type
                             });
                         }
                     });
@@ -261,20 +267,37 @@ function synchronizeGetPortalOutputs(getNodeInstance) {
             });
         }
 
+        // Remove existing outputs from the GetNamedPortal node
         while (getNodeInstance.outputs && getNodeInstance.outputs.length > 0) {
             getNodeInstance.removeOutput(0);
         }
+
+        // Add the new, desired outputs
         desiredOutputs.forEach(slot => {
             getNodeInstance.addOutput(slot.name, slot.type, { label: slot.label });
         });
 
-        if (oldLinksData.length > 0 && getNodeInstance.outputs) {
-            getNodeInstance.outputs.forEach((newOutput, newIndex) => {
-                const correspondingOldLink = oldLinksData.find(oldLink => oldLink.originalOutputName === newOutput.name);
-                if (correspondingOldLink) {
-                    const targetNode = app.graph.getNodeById(correspondingOldLink.targetNodeId);
-                    if (targetNode && !targetNode.inputs[correspondingOldLink.targetSlotIndex].link) {
-                        getNodeInstance.connect(newIndex, targetNode, correspondingOldLink.targetSlotIndex);
+        // Attempt to re-establish all old links
+        if (oldLinksData.length > 0 && getNodeInstance.outputs && getNodeInstance.outputs.length > 0) {
+            oldLinksData.forEach(oldLink => {
+                // Find the new output slot that corresponds to the oldLink's original output.
+                // Matching by name is generally robust if output names are consistent.
+                const newOutputSlot = getNodeInstance.outputs.find(o => o.name === oldLink.originalOutputName);
+
+                if (newOutputSlot) {
+                    const newOutputSlotIndex = getNodeInstance.outputs.indexOf(newOutputSlot);
+                    const targetNode = app.graph.getNodeById(oldLink.targetNodeId);
+
+                    // Ensure the target node and specific input slot still exist
+                    if (targetNode && targetNode.inputs[oldLink.targetSlotIndex]) {
+                        // Attempt to reconnect. LiteGraph's connect method handles link creation.
+                        // It typically won't create a duplicate link if the target input is already full,
+                        // but here we are restoring connections that should have been unique.
+                        const restoredLinkObject = getNodeInstance.connect(newOutputSlotIndex, targetNode, oldLink.targetSlotIndex);
+                        if (restoredLinkObject && app.graph.links[restoredLinkObject.id]) {
+                            // Restore the original link type if the connection was successful
+                            app.graph.links[restoredLinkObject.id].type = oldLink.linkType;
+                        }
                     }
                 }
             });
