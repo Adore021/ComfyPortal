@@ -1,0 +1,15 @@
+[project]
+name = "ComfyPortal"
+description = ""
+version = "1.0.1"
+license = {file = "LICENSE"}
+
+[project.urls]
+Repository = "https://github.com/Adore021/ComfyPortal"
+#  Used by Comfy Registry https://registry.comfy.org
+
+[tool.comfy]
+PublisherId = "Adore"
+DisplayName = "ComfyPortal"
+Icon = ""
+includes = []
